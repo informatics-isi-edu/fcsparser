@@ -16,9 +16,12 @@ import sys
 import warnings
 import string
 import os
-import logging
+import re
+import pdb
 
 import numpy
+
+from itertools import chain, izip
 
 try:
     import pandas as pd
@@ -49,6 +52,8 @@ class FCSParser(object):
     self.annotation: a dictionary holding the parsed content of the TEXT segment
                      In addition, a key called __header__ has been added to this dictionary
                      It specifies the information parsed from the FCS file HEADER segment.
+                                , a key called __original__ has been added to this dictionary
+                     It tracks the original TEXT entry that got numerical conversion
                      (This won't be necessary for most users.)
 
     self.data holds the parsed DATA segment
@@ -101,6 +106,7 @@ class FCSParser(object):
         self._text_end = -1
         self.channel_numbers = []
         self._analysis = ''
+        self._delimiter= '' 
 
         self._file_size = os.path.getsize(path)
 
@@ -113,11 +119,11 @@ class FCSParser(object):
         with open(path, 'rb') as f:
             f.seek(dataset_start,0)
             self.read_header(f)
-            if(self._dataset_start):
-                self._data_start=self._data_start+self._dataset_start;
-                self._data_end=self._data_end+self._dataset_start;
-                self._text_start=self._text_start+self._dataset_start;
-                self._text_end=self._text_end+self._dataset_start;
+            if(self._dataset_start): 
+              self._data_start=self._data_start+self._dataset_start;
+              self._data_end=self._data_end+self._dataset_start;
+              self._text_start=self._text_start+self._dataset_start;
+              self._text_end=self._text_end+self._dataset_start;
             self.read_text(f)
             if read_data:
                 self.read_data(f)
@@ -177,6 +183,7 @@ class FCSParser(object):
         # There are some differences in how the 
         file_handle.seek(self._text_start, 0)
         raw_text = file_handle.read(self._text_end - self._text_start + 1)
+
         raw_text = raw_text.decode('utf-8')
 
         #####
@@ -195,6 +202,8 @@ class FCSParser(object):
         raw_text_segments = raw_text[1:-1].split(delimiter)
         keys, values = raw_text_segments[0::2], raw_text_segments[1::2]
         text = {key: value for key, value in zip(keys, values)}  # build dictionary
+
+        self._delimiter = delimiter
 
         ####
         # Extract channel names and convert some of the channel properties
@@ -221,6 +230,7 @@ class FCSParser(object):
         self.channel_names_s = names_s
         self.channel_names_n = names_n
 
+
         # Convert some of the fields into integer values
         keys_encoding_bits = ['$P{0}B'.format(i) for i in self.channel_numbers]
 
@@ -231,11 +241,15 @@ class FCSParser(object):
 
         keys_to_convert_to_int = keys_encoding_bits + add_keys_to_convert_to_int
 
+        original={}
+        # track original text[key]
         for key in keys_to_convert_to_int:
             value = text[key]
             text[key] = int(value)
+            original[key] = value
 
         self.annotation.update(text)
+        self.annotation['__original__'] = original
 
         # Update data start segments if needed
 
@@ -260,7 +274,7 @@ class FCSParser(object):
         start = self.annotation['__header__']['analysis start']
         end = self.annotation['__header__']['analysis end']
         if start != 0 and end != 0:
-            file_handle.seek(start+self._dataset_start, 0)
+            file_handle.seek(start, 0)
             self._analysis = file_handle.read(end - start)
         else:
             self._analysis = ''
@@ -273,16 +287,16 @@ class FCSParser(object):
         keys = text.keys()
 
         if '$NEXTDATA' in text:
-           if int(text['$NEXTDATA']) != 0:
+            if int(text['$NEXTDATA']) != 0:
                 if '$ENDDATA' in text:
                     nextdata = int(text['$NEXTDATA'])
                     enddata = int(text['$ENDDATA'])
                     if nextdata != enddata+1:
                         raise ParserFeatureNotImplementedError('Not implemented $NEXTDATA is not 0 or $NEXTDATA != $ENDDATA+1 ')
                 else:
-                    logging.error('$NEXTDATA is not 0, this file has multiple datasets')
-
-
+                    raise ParserFeatureNotImplementedError('Not implemented $NEXTDATA is not 0 or $NEXTDATA != $ENDDATA+1')
+ 
+ 
         if '$MODE' not in text or text['$MODE'] != 'L':
             raise ParserFeatureNotImplementedError('Mode not implemented')
 
@@ -334,8 +348,8 @@ class FCSParser(object):
                 "The FCS file '{}' is corrupted. Part of the data segment is missing.".format(
                     self.path))
 
-        num_events = text['$TOT']  # Number of events recorded
-        num_pars = text['$PAR']  # Number of parameters recorded
+        num_events = int(text['$TOT'])  # Number of events recorded
+        num_pars = int(text['$PAR'])  # Number of parameters recorded
 
         if text['$BYTEORD'].strip() == '1,2,3,4' or text['$BYTEORD'].strip() == '1,2':
             endian = '<'
@@ -354,7 +368,7 @@ class FCSParser(object):
 
         # Calculations to figure out data types of each of parameters
         # $PnB specifies the number of bits reserved for a measurement of parameter n
-        bytes_per_par_list = [int(text['$P{0}B'.format(i)] / 8) for i in self.channel_numbers]
+        bytes_per_par_list = [int(int(text['$P{0}B'.format(i)]) / 8) for i in self.channel_numbers]
 
         par_numeric_type_list = [
             '{endian}{type}{size}'.format(endian=endian, type=conversion_dict[text['$DATATYPE']],
@@ -432,7 +446,7 @@ class FCSParser(object):
                 if key in meta:
                     meta.pop(key)
 
-        num_channels = meta['$PAR']
+        num_channels = int(meta['$PAR'])
         column_names = ['$Pn{0}'.format(p) for p in channel_properties]
 
         df = pd.DataFrame(channel_matrix, columns=column_names,
@@ -445,6 +459,104 @@ class FCSParser(object):
         meta['_channels_'] = df
         meta['_channel_names_'] = self.get_channel_names()
 
+################
+    def write_header(self, file_handle):
+        """
+        Reads the header of the FCS file.
+        The header specifies where the annotation,
+        data and analysis are located inside the binary file.
+        """
+        header = self.annotation['__header__']  # For convenience
+ 
+        file_handle.write('%6s' % header['FCS format'])
+        # 4 space characters after the FCS format
+        file_handle.write('%1c' % ' ')
+        file_handle.write('%1c' % ' ')
+        file_handle.write('%1c' % ' ')
+        file_handle.write('%1c' % ' ')
+
+        file_handle.write('%8s' % str(header['text start']))
+        file_handle.write('%8s' % str(header['text end']))
+        file_handle.write('%8s' % str(header['data start']))
+        file_handle.write('%8s' % str(header['data end']))
+        file_handle.write('%8s' % str(header['analysis start']))
+        file_handle.write('%8s' % str(header['analysis end']))
+
+
+    def write_text(self, file_handle):
+        """
+        Writes the TEXT segment of the FCS file.
+        This is the meta data associated with the FCS file.
+        """
+        header = self.annotation['__header__']  # For convenience
+        original = self.annotation['__original__']
+
+        #####
+        # Write out the TEXT segment of the FCS file
+        delimiter = self._delimiter
+        text = self.annotation
+
+        ### remove __header__ and __original__ from text
+        del text['__header__']
+        del text['__original__']
+
+## ISAC Recommendation FCS 3.1 - Data File Standards for Flow Cytometry
+## 3.2.17
+## Values of numerical keywords (e.g., values of $BEGINANALYSIS, $BEGINDATA,
+## $BEGINSTEXT, $ENDANALYSIS, $ENDDATA, $ENDSTEXT, $NEXTDATA, $PAR, $PnB,
+## $PnR, $TOT) shall not be padded with any non-numerical characters (including 
+## spaces and other white characters). However, leading zeros '0' (ASCII 48) 
+## may be used. For example, you may use $BEGINDATA/0000012345/ and you may 
+## not use $BEGINDATA/ 12345/.
+
+        for k in original.keys():
+            text[k]=original[k]
+
+        # Convert some of the fields into integer values
+        add_keys_encoding_bits_b = ['$P{0}B'.format(i) for i in self.channel_numbers]
+        add_keys_encoding_bits_r = ['$P{0}R'.format(i) for i in self.channel_numbers]
+
+        ### fix meta content, leading space to 0
+        add_keys_to_fix_space = [
+                'GTI$BEGINLOG','$BEGINANALYSIS','$BEGINSTEXT','$BEGINDATA',
+                'GTI$ENDLOG','$ENDANALYSIS','$ENDSTEXT','$ENDDATA',
+                '$NEXTDATA','$PAR','$TOT']
+
+        keys_to_fix_space = add_keys_encoding_bits_r + add_keys_encoding_bits_b + add_keys_to_fix_space
+
+        for key in keys_to_fix_space:
+           if key in text:
+             tmp = re.sub(u' ', u'0', text[key])
+             text[key]=tmp;
+
+        ### '$NEXTDATA' -> replace Everything with 0
+        if '$NEXTDATA' in text:
+          tmp = re.sub(u'[1-9]', u'0', text['$NEXTDATA'])
+          text['$NEXTDATA']=tmp
+        
+        keylist = text.keys()
+        valuelist = text.values()
+        textlist=list(chain.from_iterable(izip(keylist, valuelist)))
+        newlist=delimiter.join(textlist)
+        new_text=delimiter+newlist+delimiter
+        
+        file_handle.write(new_text)
+        
+
+    def write_analysis(self, file_handle):
+        """
+        Writes the ANALYSIS segment of the FCS file and stores it in self.analysis
+        """
+        analysis=self._analysis;
+        file_handle.write(analysis);
+
+    def write_data(self, file_handle):
+        """
+        """
+        data=self._data;
+        file_handle.write(data);
+       
+       
 
 def parse(path, dataset_start=0, meta_data_only=False, output_format='DataFrame', compensate=False,
               channel_naming='$PnS',
@@ -457,7 +569,7 @@ def parse(path, dataset_start=0, meta_data_only=False, output_format='DataFrame'
     path : str
         Path of .fcs file
     dataset_start : integer
-        Start of dataset in the file (multi-dataset)
+        Start of dataset in the file
     meta_data_only : bool
         If True, the parse_fcs only returns the meta_data (the TEXT segment of the FCS file)
     output_format : 'DataFrame' | 'ndarray'
@@ -497,6 +609,7 @@ def parse(path, dataset_start=0, meta_data_only=False, output_format='DataFrame'
     meta, data_pandas = parse_fcs(fname, meta_data_only=False, output_format='DataFrame')
     meta, data_numpy  = parse_fcs(fname, meta_data_only=False, output_format='ndarray')
     """
+
     if compensate:
         raise ParserFeatureNotImplementedError("Compensation has not been implemented yet.")
 
@@ -526,3 +639,52 @@ def parse(path, dataset_start=0, meta_data_only=False, output_format='DataFrame'
         return meta, parsed_fcs.data
     else:
         raise ValueError("The output_format must be either 'ndarray' or 'DataFrame'")
+
+
+def rewrite(path, dataset_start=0):
+    """
+    Parse an fcs segment at the location specified by the path
+    and write out a single fcs conforming file.
+
+    Parameters
+    ----------
+    path : str
+        Path of .fcs file
+    dataset_start : integer
+        Start of dataset in the file
+
+    Returns
+    -------
+      nextdata, offset to the start of next dataset
+    """
+
+    meta_data_only=False
+    output_format='DataFrame'
+    compensate=False
+    channel_naming='$PnS'
+    reformat_meta=False
+    nextdata=0
+    sampleId="out"
+
+    read_data = not meta_data_only
+
+    parsed_fcs = FCSParser(path, dataset_start=dataset_start, read_data=read_data, channel_naming=channel_naming)
+
+    meta = parsed_fcs.annotation
+
+    if '$NEXTDATA' in meta:
+        nextdata=int(meta['$NEXTDATA'])
+    if 'GTI$SAMPLEID' in meta:
+        sampleId=meta['GTI$SAMPLEID']
+
+    newpath=path+'_isrd_'+sampleId+'.FCS'
+    with open(newpath, 'wb') as f:
+        parsed_fcs.write_header(f)
+        parsed_fcs.write_text(f)
+        parsed_fcs.write_data(f)
+
+    f.close()
+    return nextdata
+
+
+
