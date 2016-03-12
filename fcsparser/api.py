@@ -681,7 +681,7 @@ def rewrite(path, outdir='.', dataset_start=0):
         sampleId=meta['GTI$SAMPLEID']
 
     fname=os.path.basename(path)
-    newpath=os.path.join(outdir,fname+'_isrd_'+sampleId+'.FCS')
+    newpath=os.path.join(outdir,fname+'_'+sampleId+'.FCS')
     with open(newpath, 'wb') as f:
         parsed_fcs.write_header(f)
         parsed_fcs.write_text(f)
