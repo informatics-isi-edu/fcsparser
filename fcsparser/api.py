@@ -18,6 +18,7 @@ import string
 import os
 import re
 import pdb
+import logging
 
 import numpy
 
@@ -237,7 +238,7 @@ class FCSParser(object):
         # unused currently but keep for debugging
         # keys_encoding_range = ['$P{0}R'.format(i) for i in self.channel_numbers]
 
-        add_keys_to_convert_to_int = ['$NEXTDATA', '$PAR', '$TOT']
+        add_keys_to_convert_to_int = ['$NEXTDATA', '$ENDDATA', '$PAR', '$TOT']
 
         keys_to_convert_to_int = keys_encoding_bits + add_keys_to_convert_to_int
 
@@ -286,17 +287,17 @@ class FCSParser(object):
         text = self.annotation
         keys = text.keys()
 
-        if '$NEXTDATA' in text:
-            if int(text['$NEXTDATA']) != 0:
-                if '$ENDDATA' in text:
-                    nextdata = int(text['$NEXTDATA'])
-                    enddata = int(text['$ENDDATA'])
-                    if nextdata != enddata+1:
-                        raise ParserFeatureNotImplementedError('Not implemented $NEXTDATA is not 0 or $NEXTDATA != $ENDDATA+1 ')
+        if '$NEXTDATA' in text and text['$NEXTDATA'] != 0:
+            if '$ENDDATA' in text:
+                nextdata = text['$NEXTDATA']
+                enddata = text['$ENDDATA']
+                if nextdata != enddata+1:
+                    logging.error('This file has multiple datasets, $NEXTDATA must equal to $ENDDATA+1')
                 else:
-                    raise ParserFeatureNotImplementedError('Not implemented $NEXTDATA is not 0 or $NEXTDATA != $ENDDATA+1')
- 
- 
+                    logging.info('This file has multiple datasets')
+            else:
+                logging.error('This file has multiple datasets, $ENDDATA not defined')
+
         if '$MODE' not in text or text['$MODE'] != 'L':
             raise ParserFeatureNotImplementedError('Mode not implemented')
 
@@ -641,15 +642,17 @@ def parse(path, dataset_start=0, meta_data_only=False, output_format='DataFrame'
         raise ValueError("The output_format must be either 'ndarray' or 'DataFrame'")
 
 
-def rewrite(path, dataset_start=0):
+def rewrite(path, outdir='.', dataset_start=0):
     """
     Parse an fcs segment at the location specified by the path
-    and write out a single fcs conforming file.
+    and write out fcs conforming single dataset files.
 
     Parameters
     ----------
     path : str
         Path of .fcs file
+    outdir : str
+        Path of the output directory
     dataset_start : integer
         Start of dataset in the file
 
@@ -677,14 +680,15 @@ def rewrite(path, dataset_start=0):
     if 'GTI$SAMPLEID' in meta:
         sampleId=meta['GTI$SAMPLEID']
 
-    newpath=path+'_isrd_'+sampleId+'.FCS'
+    fname=os.path.basename(path)
+    newpath=os.path.join(outdir,fname+'_isrd_'+sampleId+'.FCS')
     with open(newpath, 'wb') as f:
         parsed_fcs.write_header(f)
         parsed_fcs.write_text(f)
         parsed_fcs.write_data(f)
 
     f.close()
-    return nextdata
+    return nextdata, newpath
 
 
 
