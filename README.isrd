@@ -1,0 +1,17 @@
+
+This is internal documentation for fcsparser used
+for isrd's fcs-viewer (informatics-isi-edu/fcs-viewer)
+
+
+fcsparser from the wild
+  https://github.com/eyurtsev/fcsparser
+
+forked from fcsparser from the wild
+  informatics-isi-edu/fcsparser
+
+The part of the code that was used for reading and
+writing of FCS data files is in the 'writer' branch 
+
+
+
+
